@@ -1,0 +1,42 @@
+{
+  "name": "telegram-coding-agent",
+  "version": "1.0.0",
+  "description": "A $0-budget Telegram coding agent — multi-model AI fallback, vector-search memory, sandboxed file/code tools. Built for Termux, TypeScript, designed to scale beyond it.",
+  "main": "dist/index.js",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "dev": "tsx watch src/index.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "clean": "rimraf dist"
+  },
+  "keywords": ["telegram", "bot", "coding-agent", "termux", "typescript"],
+  "author": "Kevo (KEVO LOVES)",
+  "license": "MIT",
+  "dependencies": {
+    "grammy": "^1.28.0",
+    "axios": "^1.7.9",
+    "nedb-promises": "^6.2.3",
+    "uuid": "^9.0.1",
+    "dotenv": "^16.4.5",
+    "adm-zip": "^0.5.15",
+    "zod": "^3.23.8",
+    "pino": "^9.5.0",
+    "pino-pretty": "^11.3.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3",
+    "tsx": "^4.19.2",
+    "vitest": "^2.1.8",
+    "rimraf": "^6.0.1",
+    "@types/node": "^22.10.2",
+    "@types/uuid": "^9.0.8",
+    "@types/adm-zip": "^0.5.6"
+  }
+}
