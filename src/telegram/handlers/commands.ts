@@ -1,6 +1,6 @@
 import type { AIFallbackRouter } from '../../ai/fallbackRouter';
 import type { MemoryDatabase } from '../../memory/db';
-import { hasActiveExecution, getActiveExecution } from './message';
+import { getActiveExecution, clearPendingDocumentRequest } from '../executionState';
 import type { Bot, BotContext } from '../bot';
 
 export interface CommandDeps {
@@ -68,6 +68,7 @@ export function registerCommands(bot: Bot, deps: CommandDeps): void {
   bot.command('clear', async (ctx) => {
     const telegramId = ctx.from?.id;
     if (telegramId === undefined) return;
+    clearPendingDocumentRequest((await deps.db.upsertUser(telegramId, ctx.from?.first_name ?? 'there'))._id);
     await ctx.reply('Got it — I\'ll lean on summaries and search instead of recent history for a while. 🧹');
   });
 }

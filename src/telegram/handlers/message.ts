@@ -12,6 +12,12 @@ import { estimateTokens } from '../../utils/tokenCounter';
 import { StatusReporter } from '../statusReporter';
 import { describeToolCall, randomThinkingPhrase } from '../toolStatusMessages';
 import type { BotContext } from '../bot';
+import {
+  setActiveExecution,
+  clearActiveExecution,
+  setPendingDocumentRequest,
+  clearPendingDocumentRequest,
+} from '../executionState';
 
 const log = logger.child({ module: 'telegram:messageHandler' });
 const TELEGRAM_MAX_MESSAGE_LENGTH = 4000;
@@ -25,18 +31,13 @@ export interface MessageHandlerDeps {
   embed: (text: string) => Promise<number[] | null>;
 }
 
-/** Tracks one active execution per user so /stop can cancel it. */
-const activeExecutions = new Map<string, CancellationToken>();
-
-export function getActiveExecution(userId: string): CancellationToken | undefined {
-  return activeExecutions.get(userId);
-}
-
-export function hasActiveExecution(userId: string): boolean {
-  const token = activeExecutions.get(userId);
-  return token !== undefined && !token.isCancelled;
-}
-
+/**
+ * One turn of the conversation loop:
+ *   persist user msg -> build smart context -> run the agent loop via
+ *   ExecutionController (with guardrails, cancellation, and metadata)
+ *   -> deliver any resulting files as real Telegram attachments ->
+ *   persist assistant msg -> maybe summarize in the background.
+ */
 export function createMessageHandler(deps: MessageHandlerDeps) {
   return async function handleMessage(ctx: BotContext): Promise<void> {
     const telegramId = ctx.from?.id;
@@ -52,8 +53,9 @@ export function createMessageHandler(deps: MessageHandlerDeps) {
     const userEmbedding = await deps.embed(text);
     await deps.db.saveMessage(user._id, 'user', text, estimateTokens(text), userEmbedding);
 
+    // Create cancellation token for this execution
     const cancellationToken = new CancellationToken();
-    activeExecutions.set(user._id, cancellationToken);
+    setActiveExecution(user._id, cancellationToken);
 
     try {
       const context = await deps.contextBuilder.build(user._id, text);
@@ -77,14 +79,17 @@ export function createMessageHandler(deps: MessageHandlerDeps) {
 
       await status.clear();
 
+      // Deliver final content
       if (run.finalContent) {
         await sendChunked(ctx, run.finalContent);
       }
 
+      // Deliver tool results as status messages (concise)
       for (const step of run.steps) {
         await sendChunked(ctx, `${step.result.success ? '✅' : '⚠️'} ${step.result.message}`);
       }
 
+      // Notify user if we hit a limit
       if (run.terminationReason === 'max_iterations') {
         await ctx.reply(`⏱️ Hit the ${env.AGENT_MAX_STEPS}-step limit for this turn — say "continue" if there's more to do.`);
       } else if (run.terminationReason === 'max_tool_calls_per_step') {
@@ -95,8 +100,10 @@ export function createMessageHandler(deps: MessageHandlerDeps) {
         await ctx.reply('❌ All AI providers are currently unavailable. Please try again later.');
       }
 
+      // Send file attachments
       await deliverFileArtifacts(ctx, deps.tools, user._id, run.steps);
 
+      // Persist assistant message
       const assistantEmbedding = await deps.embed(run.finalContent || '(tool calls)');
       const toolNames = run.steps.map((s) => s.toolCall.name);
       await deps.db.saveMessage(
@@ -107,15 +114,47 @@ export function createMessageHandler(deps: MessageHandlerDeps) {
         assistantEmbedding,
       );
 
+      // Detect if AI asked for a document upload
+      detectAndTrackDocumentRequest(user._id, run.finalContent);
+
+      // Fire-and-forget summarization
       void deps.summarizer.maybeSummarize(user._id, env.SUMMARIZE_AFTER_MESSAGES);
     } catch (err) {
       await status.clear();
       log.error({ err: err instanceof Error ? err.message : String(err) }, 'Failed to handle message');
       await ctx.reply('❌ Something went wrong generating a response. Please try again.');
     } finally {
-      activeExecutions.delete(user._id);
+      clearActiveExecution(user._id);
     }
   };
+}
+
+/**
+ * Heuristic: if the AI's final message asks the user to upload/send a file,
+ * set a pending document request so the document handler can process the
+ * upload automatically without making the user type an extra message.
+ */
+function detectAndTrackDocumentRequest(userId: string, content: string | null): void {
+  if (!content) {
+    clearPendingDocumentRequest(userId);
+    return;
+  }
+  const lower = content.toLowerCase();
+  const askingForFile =
+    lower.includes('upload') ||
+    lower.includes('send me') ||
+    lower.includes('attach the') ||
+    lower.includes('share the file') ||
+    lower.includes('send the file') ||
+    lower.includes('upload the') ||
+    lower.includes('provide the file');
+
+  if (askingForFile) {
+    setPendingDocumentRequest(userId, content);
+    log.debug({ userId }, 'AI asked for document — pending request set');
+  } else {
+    clearPendingDocumentRequest(userId);
+  }
 }
 
 async function deliverFileArtifacts(ctx: BotContext, tools: ToolRegistry, userId: string, steps: Array<{ toolCall: { name: string }; result: { success: boolean; data?: unknown } }>): Promise<void> {

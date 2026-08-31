@@ -14,6 +14,8 @@ function describeToolCall(name, args) {
     const dirname = typeof args.dirname === 'string' ? args.dirname : undefined;
     const outputName = typeof args.outputName === 'string' ? args.outputName : undefined;
     const language = typeof args.language === 'string' ? args.language : undefined;
+    const query = typeof args.query === 'string' ? args.query : undefined;
+    const url = typeof args.url === 'string' ? args.url : undefined;
     switch (name) {
         case 'create_file':
             return `📝 Writing ${filename ?? 'a file'}...`;
@@ -33,6 +35,10 @@ function describeToolCall(name, args) {
             return `📂 Unzipping ${filename ?? 'the archive'}...`;
         case 'execute_code':
             return `⚙️ Running ${language ?? 'the'} snippet...`;
+        case 'web_search':
+            return `🔍 Searching: "${query ? query.slice(0, 40) : 'web'}..."`;
+        case 'fetch_webpage':
+            return `🌐 Fetching ${url ? url.slice(0, 40) : 'webpage'}...`;
         default:
             return `🔧 Running ${name}...`;
     }

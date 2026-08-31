@@ -39,6 +39,20 @@ exports.TOOL_SCHEMAS = [
     {
         type: 'function',
         function: {
+            name: 'read_document',
+            description: 'Read and parse a document file (PDF, DOCX, CSV, TXT, JSON, MD) from the sandboxed workspace. Returns the text content in a format suitable for analysis. For CSV, returns a structured preview with row count.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    filename: { type: 'string', description: 'Relative filename of the document to read' },
+                },
+                required: ['filename'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
             name: 'update_file',
             description: 'Overwrite an existing file with new content.',
             parameters: {
@@ -126,14 +140,28 @@ exports.TOOL_SCHEMAS = [
     {
         type: 'function',
         function: {
-            name: 'read_document',
-            description: 'Read and parse a document file (PDF, DOCX, CSV, TXT, JSON, MD) from the sandboxed workspace. Returns the text content in a format suitable for analysis. For CSV, returns a structured preview with row count.',
+            name: 'web_search',
+            description: 'Search the web using DuckDuckGo. Returns top results with title, URL, and snippet. Use this to find latest documentation, library versions, code examples, or verify current best practices before writing code. No API key required.',
             parameters: {
                 type: 'object',
                 properties: {
-                    filename: { type: 'string', description: 'Relative filename of the document to read' },
+                    query: { type: 'string', description: 'Search query. Be specific. Example: "React 19 new features documentation" or "shadcn ui latest installation"' },
                 },
-                required: ['filename'],
+                required: ['query'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'fetch_webpage',
+            description: 'Fetch and extract text content from a specific webpage URL. Use after web_search to read documentation, blog posts, or GitHub pages in detail. Returns the page title and readable text content.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    url: { type: 'string', description: 'Full URL of the webpage to fetch' },
+                },
+                required: ['url'],
             },
         },
     },

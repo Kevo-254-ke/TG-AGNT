@@ -1,7 +1,5 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.getActiveExecution = getActiveExecution;
-exports.hasActiveExecution = hasActiveExecution;
 exports.createMessageHandler = createMessageHandler;
 const grammy_1 = require("grammy");
 const env_1 = require("../../config/env");
@@ -12,17 +10,16 @@ const toolRegistry_1 = require("../../tools/toolRegistry");
 const tokenCounter_1 = require("../../utils/tokenCounter");
 const statusReporter_1 = require("../statusReporter");
 const toolStatusMessages_1 = require("../toolStatusMessages");
+const executionState_1 = require("../executionState");
 const log = logger_1.logger.child({ module: 'telegram:messageHandler' });
 const TELEGRAM_MAX_MESSAGE_LENGTH = 4000;
-/** Tracks one active execution per user so /stop can cancel it. */
-const activeExecutions = new Map();
-function getActiveExecution(userId) {
-    return activeExecutions.get(userId);
-}
-function hasActiveExecution(userId) {
-    const token = activeExecutions.get(userId);
-    return token !== undefined && !token.isCancelled;
-}
+/**
+ * One turn of the conversation loop:
+ *   persist user msg -> build smart context -> run the agent loop via
+ *   ExecutionController (with guardrails, cancellation, and metadata)
+ *   -> deliver any resulting files as real Telegram attachments ->
+ *   persist assistant msg -> maybe summarize in the background.
+ */
 function createMessageHandler(deps) {
     return async function handleMessage(ctx) {
         const telegramId = ctx.from?.id;
@@ -35,8 +32,9 @@ function createMessageHandler(deps) {
         await status.start((0, toolStatusMessages_1.randomThinkingPhrase)());
         const userEmbedding = await deps.embed(text);
         await deps.db.saveMessage(user._id, 'user', text, (0, tokenCounter_1.estimateTokens)(text), userEmbedding);
+        // Create cancellation token for this execution
         const cancellationToken = new cancellation_1.CancellationToken();
-        activeExecutions.set(user._id, cancellationToken);
+        (0, executionState_1.setActiveExecution)(user._id, cancellationToken);
         try {
             const context = await deps.contextBuilder.build(user._id, text);
             log.debug({ userId: user._id, sources: context.sources, tokenEstimate: context.tokenEstimate }, 'Context built');
@@ -52,12 +50,15 @@ function createMessageHandler(deps) {
                 cancellationToken,
             });
             await status.clear();
+            // Deliver final content
             if (run.finalContent) {
                 await sendChunked(ctx, run.finalContent);
             }
+            // Deliver tool results as status messages (concise)
             for (const step of run.steps) {
                 await sendChunked(ctx, `${step.result.success ? '✅' : '⚠️'} ${step.result.message}`);
             }
+            // Notify user if we hit a limit
             if (run.terminationReason === 'max_iterations') {
                 await ctx.reply(`⏱️ Hit the ${env_1.env.AGENT_MAX_STEPS}-step limit for this turn — say "continue" if there's more to do.`);
             }
@@ -70,10 +71,15 @@ function createMessageHandler(deps) {
             else if (run.terminationReason === 'provider_failure') {
                 await ctx.reply('❌ All AI providers are currently unavailable. Please try again later.');
             }
+            // Send file attachments
             await deliverFileArtifacts(ctx, deps.tools, user._id, run.steps);
+            // Persist assistant message
             const assistantEmbedding = await deps.embed(run.finalContent || '(tool calls)');
             const toolNames = run.steps.map((s) => s.toolCall.name);
             await deps.db.saveMessage(user._id, 'assistant', run.finalContent || `[used tool(s): ${toolNames.join(', ') || 'none'}]`, (0, tokenCounter_1.estimateTokens)(run.finalContent), assistantEmbedding);
+            // Detect if AI asked for a document upload
+            detectAndTrackDocumentRequest(user._id, run.finalContent);
+            // Fire-and-forget summarization
             void deps.summarizer.maybeSummarize(user._id, env_1.env.SUMMARIZE_AFTER_MESSAGES);
         }
         catch (err) {
@@ -82,9 +88,35 @@ function createMessageHandler(deps) {
             await ctx.reply('❌ Something went wrong generating a response. Please try again.');
         }
         finally {
-            activeExecutions.delete(user._id);
+            (0, executionState_1.clearActiveExecution)(user._id);
         }
     };
+}
+/**
+ * Heuristic: if the AI's final message asks the user to upload/send a file,
+ * set a pending document request so the document handler can process the
+ * upload automatically without making the user type an extra message.
+ */
+function detectAndTrackDocumentRequest(userId, content) {
+    if (!content) {
+        (0, executionState_1.clearPendingDocumentRequest)(userId);
+        return;
+    }
+    const lower = content.toLowerCase();
+    const askingForFile = lower.includes('upload') ||
+        lower.includes('send me') ||
+        lower.includes('attach the') ||
+        lower.includes('share the file') ||
+        lower.includes('send the file') ||
+        lower.includes('upload the') ||
+        lower.includes('provide the file');
+    if (askingForFile) {
+        (0, executionState_1.setPendingDocumentRequest)(userId, content);
+        log.debug({ userId }, 'AI asked for document — pending request set');
+    }
+    else {
+        (0, executionState_1.clearPendingDocumentRequest)(userId);
+    }
 }
 async function deliverFileArtifacts(ctx, tools, userId, steps) {
     const zipped = collectArtifactPaths(steps, (name) => name === 'zip_files');

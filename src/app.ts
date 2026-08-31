@@ -10,9 +10,11 @@ import { NoopEmbeddingProvider } from './memory/embeddings/none';
 import { ContextBuilder } from './memory/contextBuilder';
 import { Summarizer } from './memory/summarizer';
 import { ToolRegistry } from './tools/toolRegistry';
+import { SkillRegistry } from './skills/registry';
 import { createBot, type Bot } from './telegram/bot';
 import { registerCommands } from './telegram/handlers/commands';
 import { createMessageHandler } from './telegram/handlers/message';
+import { createDocumentHandler } from './telegram/handlers/document';
 
 const log = logger.child({ module: 'app' });
 
@@ -47,7 +49,8 @@ export function createApp(): App {
       : new NoopEmbeddingProvider();
 
   const db = new MemoryDatabase(env.WORK_DIR);
-  const contextBuilder = new ContextBuilder(db, embeddings);
+  const skills = new SkillRegistry(embeddings);
+  const contextBuilder = new ContextBuilder(db, embeddings, skills);
   const summarizer = new Summarizer(db, ai, embeddings);
   const tools = new ToolRegistry(env.FILES_DIR);
 
@@ -55,16 +58,20 @@ export function createApp(): App {
 
   registerCommands(bot, { db, ai, startedAt: Date.now() });
 
-  const handleMessage = createMessageHandler({
+  const sharedDeps = {
     db,
     ai,
     contextBuilder,
     summarizer,
     tools,
     embed: (text: string) => embeddings.embed(text),
-  });
+  };
 
+  const handleMessage = createMessageHandler(sharedDeps);
   bot.on('message:text', handleMessage);
+
+  const handleDocument = createDocumentHandler({ ...sharedDeps, botToken: env.TELEGRAM_BOT_TOKEN || 'unset-token' });
+  bot.on('message:document', handleDocument);
 
   return { bot, db, ai, tools };
 }

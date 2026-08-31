@@ -1,10 +1,12 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import { env } from '../config/env';
 import { logger } from '../core/logger';
 import type { ToolExecutionResult } from '../core/types';
 import { CodeExecutor, type SupportedLanguage } from './codeExec';
 import { WorkspaceManager } from './workspaceManager';
 import { parseDocument } from './documentParser';
-
+import { webSearch, fetchWebpage } from './webSearch';
 
 const log = logger.child({ module: 'tools:registry' });
 
@@ -34,6 +36,20 @@ export class ToolRegistry {
     return this.workspaces.forUser(userId).resolveAbsolutePath(relativePath);
   }
 
+  /**
+   * Saves a document (binary buffer) directly into a user's workspace.
+   * Used by the Telegram document handler to persist uploaded files.
+   */
+  async saveDocument(userId: string, filename: string, data: Buffer): Promise<{ path: string; bytes: number }> {
+    const fileOps = this.workspaces.forUser(userId);
+    const filepath = fileOps.resolveAbsolutePath(filename);
+    await fs.mkdir(path.dirname(filepath), { recursive: true });
+    await fs.writeFile(filepath, data);
+    const relativePath = path.relative(fileOps.rootDir, filepath);
+    log.info({ userId, path: relativePath, bytes: data.length }, 'Document saved');
+    return { path: relativePath, bytes: data.length };
+  }
+
   async execute(name: string, args: Record<string, unknown>, userId: string): Promise<ToolExecutionResult> {
     const fileOps = this.workspaces.forUser(userId);
 
@@ -48,6 +64,20 @@ export class ToolRegistry {
           const { filename } = requireStrings(args, ['filename']);
           const content = await fileOps.read(filename);
           return { success: true, message: content, data: { filename, content } };
+        }
+        case 'read_document': {
+          const { filename } = requireStrings(args, ['filename']);
+          const absolutePath = fileOps.resolveAbsolutePath(filename);
+          const parsed = await parseDocument(absolutePath, filename);
+          if (parsed.error) {
+            return { success: false, message: parsed.error, data: parsed };
+          }
+          const meta = parsed.rows !== undefined ? ` (${parsed.rows} rows)` : parsed.pages !== undefined ? ` (${parsed.pages} pages)` : '';
+          return {
+            success: true,
+            message: `📄 ${parsed.filename}${meta}\n\n${parsed.content}`,
+            data: parsed,
+          };
         }
         case 'update_file': {
           const { filename, content } = requireStrings(args, ['filename', 'content']);
@@ -91,18 +121,33 @@ export class ToolRegistry {
             .join('\n\n');
           return { success: result.exitCode === 0, message: summary, data: result };
         }
-                case 'read_document': {
-          const { filename } = requireStrings(args, ['filename']);
-          const absolutePath = fileOps.resolveAbsolutePath(filename);
-          const parsed = await parseDocument(absolutePath, filename);
-          if (parsed.error) {
-            return { success: false, message: parsed.error, data: parsed };
+        case 'web_search': {
+          const { query } = requireStrings(args, ['query']);
+          const results = await webSearch(query);
+          if (results.length === 0) {
+            return { success: false, message: 'No search results found. Try a different query.' };
           }
-          const meta = parsed.rows !== undefined ? ` (${parsed.rows} rows)` : parsed.pages !== undefined ? ` (${parsed.pages} pages)` : '';
+          const formatted = results
+            .map((r, i) => `${i + 1}. **${r.title}**\n   ${r.url}\n   ${r.snippet}`)
+            .join('\n\n');
           return {
             success: true,
-            message: `📄 ${parsed.filename}${meta}\n\n${parsed.content}`,
-            data: parsed,
+            message: `🔍 Search results for "${query}":\n\n${formatted}`,
+            data: results,
+          };
+        }
+        case 'fetch_webpage': {
+          const { url } = requireStrings(args, ['url']);
+          const page = await fetchWebpage(url);
+          if (page.error) {
+            return { success: false, message: `Failed to fetch page: ${page.error}`, data: page };
+          }
+          const preview = page.content.slice(0, 2000);
+          const truncated = page.content.length > 2000 ? `\n\n[... ${page.content.length - 2000} more characters]` : '';
+          return {
+            success: true,
+            message: `📄 ${page.title || 'Webpage'}\n${url}\n\n${preview}${truncated}`,
+            data: page,
           };
         }
         default:

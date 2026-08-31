@@ -12,9 +12,11 @@ const none_1 = require("./memory/embeddings/none");
 const contextBuilder_1 = require("./memory/contextBuilder");
 const summarizer_1 = require("./memory/summarizer");
 const toolRegistry_1 = require("./tools/toolRegistry");
+const registry_1 = require("./skills/registry");
 const bot_1 = require("./telegram/bot");
 const commands_1 = require("./telegram/handlers/commands");
 const message_1 = require("./telegram/handlers/message");
+const document_1 = require("./telegram/handlers/document");
 const log = logger_1.logger.child({ module: 'app' });
 /**
  * Builds every layer (AI providers -> memory -> tools -> Telegram) and
@@ -40,20 +42,24 @@ function createApp() {
         ? new huggingface_1.HuggingFaceEmbeddingProvider(env_1.env.HUGGINGFACE_API_KEY)
         : new none_1.NoopEmbeddingProvider();
     const db = new db_1.MemoryDatabase(env_1.env.WORK_DIR);
-    const contextBuilder = new contextBuilder_1.ContextBuilder(db, embeddings);
+    const skills = new registry_1.SkillRegistry(embeddings);
+    const contextBuilder = new contextBuilder_1.ContextBuilder(db, embeddings, skills);
     const summarizer = new summarizer_1.Summarizer(db, ai, embeddings);
     const tools = new toolRegistry_1.ToolRegistry(env_1.env.FILES_DIR);
     const bot = (0, bot_1.createBot)(env_1.env.TELEGRAM_BOT_TOKEN || 'unset-token');
     (0, commands_1.registerCommands)(bot, { db, ai, startedAt: Date.now() });
-    const handleMessage = (0, message_1.createMessageHandler)({
+    const sharedDeps = {
         db,
         ai,
         contextBuilder,
         summarizer,
         tools,
         embed: (text) => embeddings.embed(text),
-    });
+    };
+    const handleMessage = (0, message_1.createMessageHandler)(sharedDeps);
     bot.on('message:text', handleMessage);
+    const handleDocument = (0, document_1.createDocumentHandler)({ ...sharedDeps, botToken: env_1.env.TELEGRAM_BOT_TOKEN || 'unset-token' });
+    bot.on('message:document', handleDocument);
     return { bot, db, ai, tools };
 }
 //# sourceMappingURL=app.js.map

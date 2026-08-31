@@ -1,7 +1,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.registerCommands = registerCommands;
-const message_1 = require("./message");
+const executionState_1 = require("../executionState");
 function registerCommands(bot, deps) {
     bot.command('start', async (ctx) => {
         await ctx.reply("👋 Welcome to your coding agent!\n\n" +
@@ -37,7 +37,7 @@ function registerCommands(bot, deps) {
         if (telegramId === undefined)
             return;
         const user = await deps.db.upsertUser(telegramId, ctx.from?.first_name ?? 'there');
-        const token = (0, message_1.getActiveExecution)(user._id);
+        const token = (0, executionState_1.getActiveExecution)(user._id);
         if (!token || token.isCancelled) {
             await ctx.reply('No active task to stop.');
             return;
@@ -49,6 +49,7 @@ function registerCommands(bot, deps) {
         const telegramId = ctx.from?.id;
         if (telegramId === undefined)
             return;
+        (0, executionState_1.clearPendingDocumentRequest)((await deps.db.upsertUser(telegramId, ctx.from?.first_name ?? 'there'))._id);
         await ctx.reply('Got it — I\'ll lean on summaries and search instead of recent history for a while. 🧹');
     });
 }

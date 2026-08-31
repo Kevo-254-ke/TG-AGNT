@@ -1,11 +1,17 @@
 "use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.FILE_PRODUCING_TOOLS = exports.ToolRegistry = void 0;
+const promises_1 = __importDefault(require("node:fs/promises"));
+const node_path_1 = __importDefault(require("node:path"));
 const env_1 = require("../config/env");
 const logger_1 = require("../core/logger");
 const codeExec_1 = require("./codeExec");
 const workspaceManager_1 = require("./workspaceManager");
 const documentParser_1 = require("./documentParser");
+const webSearch_1 = require("./webSearch");
 const log = logger_1.logger.child({ module: 'tools:registry' });
 /**
  * Maps a tool-call name (as emitted by the AI) to an executor function,
@@ -30,6 +36,19 @@ class ToolRegistry {
     resolvePath(userId, relativePath) {
         return this.workspaces.forUser(userId).resolveAbsolutePath(relativePath);
     }
+    /**
+     * Saves a document (binary buffer) directly into a user's workspace.
+     * Used by the Telegram document handler to persist uploaded files.
+     */
+    async saveDocument(userId, filename, data) {
+        const fileOps = this.workspaces.forUser(userId);
+        const filepath = fileOps.resolveAbsolutePath(filename);
+        await promises_1.default.mkdir(node_path_1.default.dirname(filepath), { recursive: true });
+        await promises_1.default.writeFile(filepath, data);
+        const relativePath = node_path_1.default.relative(fileOps.rootDir, filepath);
+        log.info({ userId, path: relativePath, bytes: data.length }, 'Document saved');
+        return { path: relativePath, bytes: data.length };
+    }
     async execute(name, args, userId) {
         const fileOps = this.workspaces.forUser(userId);
         try {
@@ -43,6 +62,20 @@ class ToolRegistry {
                     const { filename } = requireStrings(args, ['filename']);
                     const content = await fileOps.read(filename);
                     return { success: true, message: content, data: { filename, content } };
+                }
+                case 'read_document': {
+                    const { filename } = requireStrings(args, ['filename']);
+                    const absolutePath = fileOps.resolveAbsolutePath(filename);
+                    const parsed = await (0, documentParser_1.parseDocument)(absolutePath, filename);
+                    if (parsed.error) {
+                        return { success: false, message: parsed.error, data: parsed };
+                    }
+                    const meta = parsed.rows !== undefined ? ` (${parsed.rows} rows)` : parsed.pages !== undefined ? ` (${parsed.pages} pages)` : '';
+                    return {
+                        success: true,
+                        message: `📄 ${parsed.filename}${meta}\n\n${parsed.content}`,
+                        data: parsed,
+                    };
                 }
                 case 'update_file': {
                     const { filename, content } = requireStrings(args, ['filename', 'content']);
@@ -87,18 +120,33 @@ class ToolRegistry {
                         .join('\n\n');
                     return { success: result.exitCode === 0, message: summary, data: result };
                 }
-                case 'read_document': {
-                    const { filename } = requireStrings(args, ['filename']);
-                    const absolutePath = fileOps.resolveAbsolutePath(filename);
-                    const parsed = await (0, documentParser_1.parseDocument)(absolutePath, filename);
-                    if (parsed.error) {
-                        return { success: false, message: parsed.error, data: parsed };
+                case 'web_search': {
+                    const { query } = requireStrings(args, ['query']);
+                    const results = await (0, webSearch_1.webSearch)(query);
+                    if (results.length === 0) {
+                        return { success: false, message: 'No search results found. Try a different query.' };
                     }
-                    const meta = parsed.rows !== undefined ? ` (${parsed.rows} rows)` : parsed.pages !== undefined ? ` (${parsed.pages} pages)` : '';
+                    const formatted = results
+                        .map((r, i) => `${i + 1}. **${r.title}**\n   ${r.url}\n   ${r.snippet}`)
+                        .join('\n\n');
                     return {
                         success: true,
-                        message: `📄 ${parsed.filename}${meta}\n\n${parsed.content}`,
-                        data: parsed,
+                        message: `🔍 Search results for "${query}":\n\n${formatted}`,
+                        data: results,
+                    };
+                }
+                case 'fetch_webpage': {
+                    const { url } = requireStrings(args, ['url']);
+                    const page = await (0, webSearch_1.fetchWebpage)(url);
+                    if (page.error) {
+                        return { success: false, message: `Failed to fetch page: ${page.error}`, data: page };
+                    }
+                    const preview = page.content.slice(0, 2000);
+                    const truncated = page.content.length > 2000 ? `\n\n[... ${page.content.length - 2000} more characters]` : '';
+                    return {
+                        success: true,
+                        message: `📄 ${page.title || 'Webpage'}\n${url}\n\n${preview}${truncated}`,
+                        data: page,
                     };
                 }
                 default:
