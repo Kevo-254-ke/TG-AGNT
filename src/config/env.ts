@@ -22,10 +22,11 @@ const EnvSchema = z.object({
   AI_MAX_TOKENS: z.coerce.number().int().positive().default(1000),
   AI_TEMPERATURE: z.coerce.number().min(0).max(2).default(0.7),
   AI_TIMEOUT_MS: z.coerce.number().int().positive().default(90_000),
-  // Safety cap on the tool-calling loop (ask AI -> run tool -> ask AI
-  // again -> ...) for a single user turn, so a model that never stops
-  // requesting tools can't loop forever.
+
+  // Agent execution guardrails
   AGENT_MAX_STEPS: z.coerce.number().int().positive().default(8),
+  AGENT_MAX_TOOL_CALLS_PER_STEP: z.coerce.number().int().positive().default(10),
+  AGENT_TOOL_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
 
   // Embeddings (used for vector-search memory retrieval)
   EMBEDDINGS_PROVIDER: z.enum(['huggingface', 'none']).default('huggingface'),
@@ -36,9 +37,6 @@ const EnvSchema = z.object({
 
   // Storage / memory
   WORK_DIR: z.string().default('./data'),
-  // Base directory for all users' sandboxed file workspaces. Each Telegram
-  // user gets their own subfolder here (FILES_DIR/<userId>/) — see
-  // WorkspaceManager — so files are never shared across users.
   FILES_DIR: z.string().default('./files'),
   MAX_FILE_SIZE_MB: z.coerce.number().positive().default(10),
   SUMMARIZE_AFTER_MESSAGES: z.coerce.number().int().positive().default(20),
@@ -64,7 +62,6 @@ export type Env = z.infer<typeof EnvSchema>;
 function loadEnv(): Env {
   const parsed = EnvSchema.safeParse(process.env);
   if (!parsed.success) {
-    // eslint-disable-next-line no-console
     console.error('❌ Invalid environment configuration:', parsed.error.flatten().fieldErrors);
     throw new Error('Invalid environment configuration — check your .env file');
   }

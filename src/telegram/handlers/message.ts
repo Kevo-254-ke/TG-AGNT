@@ -2,7 +2,8 @@ import { InputFile } from 'grammy';
 import { env } from '../../config/env';
 import { logger } from '../../core/logger';
 import type { AIFallbackRouter } from '../../ai/fallbackRouter';
-import { runAgentLoop, type AgentStep } from '../../ai/agentLoop';
+import { ExecutionController } from '../../ai/executionController';
+import { CancellationToken } from '../../ai/cancellation';
 import type { MemoryDatabase } from '../../memory/db';
 import type { ContextBuilder } from '../../memory/contextBuilder';
 import type { Summarizer } from '../../memory/summarizer';
@@ -24,24 +25,18 @@ export interface MessageHandlerDeps {
   embed: (text: string) => Promise<number[] | null>;
 }
 
-/**
- * One turn of the conversation loop:
- *   persist user msg -> build smart context -> run the agent loop (which
- *   may ask the AI several times in a row, executing tool calls scoped
- *   to this user's own workspace in between) -> deliver any resulting
- *   files as real Telegram attachments -> persist assistant msg -> maybe
- *   summarize in the background.
- *
- * A single status message is edited in place throughout ("🤔 Thinking..."
- * -> "📂 Unzipping bundle.zip..." -> ...) so a slow AI call or a
- * multi-step tool sequence (e.g. "make three files") shows live progress
- * instead of the chat going silent — then it's deleted right before the
- * real reply/tool results are sent.
- *
- * Kept as a plain function (not a class) taking its dependencies as a
- * parameter object — easy to unit test by passing fakes, no framework
- * coupling to grammY beyond the ctx shape it reads from/replies to.
- */
+/** Tracks one active execution per user so /stop can cancel it. */
+const activeExecutions = new Map<string, CancellationToken>();
+
+export function getActiveExecution(userId: string): CancellationToken | undefined {
+  return activeExecutions.get(userId);
+}
+
+export function hasActiveExecution(userId: string): boolean {
+  const token = activeExecutions.get(userId);
+  return token !== undefined && !token.isCancelled;
+}
+
 export function createMessageHandler(deps: MessageHandlerDeps) {
   return async function handleMessage(ctx: BotContext): Promise<void> {
     const telegramId = ctx.from?.id;
@@ -57,31 +52,47 @@ export function createMessageHandler(deps: MessageHandlerDeps) {
     const userEmbedding = await deps.embed(text);
     await deps.db.saveMessage(user._id, 'user', text, estimateTokens(text), userEmbedding);
 
+    const cancellationToken = new CancellationToken();
+    activeExecutions.set(user._id, cancellationToken);
+
     try {
       const context = await deps.contextBuilder.build(user._id, text);
       log.debug({ userId: user._id, sources: context.sources, tokenEstimate: context.tokenEstimate }, 'Context built');
 
-      const run = await runAgentLoop(
+      const controller = new ExecutionController(
+        { ai: deps.ai, tools: deps.tools },
         {
-          ai: deps.ai,
-          tools: deps.tools,
           maxIterations: env.AGENT_MAX_STEPS,
-          onToolCall: (toolCall) => status.update(describeToolCall(toolCall.name, toolCall.arguments)),
+          maxToolCallsPerStep: env.AGENT_MAX_TOOL_CALLS_PER_STEP,
+          toolTimeoutMs: env.AGENT_TOOL_TIMEOUT_MS,
         },
-        context.messages,
-        user._id,
       );
+
+      const run = await controller.run({
+        messages: context.messages,
+        userId: user._id,
+        onToolCall: (toolCall) => status.update(describeToolCall(toolCall.name, toolCall.arguments)),
+        cancellationToken,
+      });
 
       await status.clear();
 
       if (run.finalContent) {
         await sendChunked(ctx, run.finalContent);
       }
+
       for (const step of run.steps) {
         await sendChunked(ctx, `${step.result.success ? '✅' : '⚠️'} ${step.result.message}`);
       }
-      if (run.hitStepLimit) {
+
+      if (run.terminationReason === 'max_iterations') {
         await ctx.reply(`⏱️ Hit the ${env.AGENT_MAX_STEPS}-step limit for this turn — say "continue" if there's more to do.`);
+      } else if (run.terminationReason === 'max_tool_calls_per_step') {
+        await ctx.reply(`⏱️ Hit the ${env.AGENT_MAX_TOOL_CALLS_PER_STEP} tool-call limit in one step — try a more focused request.`);
+      } else if (run.terminationReason === 'cancelled') {
+        await ctx.reply('⏹️ Execution stopped.');
+      } else if (run.terminationReason === 'provider_failure') {
+        await ctx.reply('❌ All AI providers are currently unavailable. Please try again later.');
       }
 
       await deliverFileArtifacts(ctx, deps.tools, user._id, run.steps);
@@ -96,30 +107,18 @@ export function createMessageHandler(deps: MessageHandlerDeps) {
         assistantEmbedding,
       );
 
-      // Fire-and-forget: summarization shouldn't block the reply.
       void deps.summarizer.maybeSummarize(user._id, env.SUMMARIZE_AFTER_MESSAGES);
     } catch (err) {
       await status.clear();
       log.error({ err: err instanceof Error ? err.message : String(err) }, 'Failed to handle message');
       await ctx.reply('❌ Something went wrong generating a response. Please try again.');
+    } finally {
+      activeExecutions.delete(user._id);
     }
   };
 }
 
-/**
- * Sends actual file attachments for anything created/updated/zipped
- * across the whole agent run, instead of leaving the user with only a
- * text description of a file they can't open.
- *
- * Default is one attachment per file (each successful create_file /
- * update_file step, across every iteration of the loop — this is what
- * makes "make three separate files" actually deliver three attachments).
- * If the AI bundled files into an archive at any point (zip_files —
- * normally because the user asked for one, or several related files
- * belonged together), only the archive is sent, not every individual
- * file that went into it, to avoid duplicate noise.
- */
-async function deliverFileArtifacts(ctx: BotContext, tools: ToolRegistry, userId: string, steps: AgentStep[]): Promise<void> {
+async function deliverFileArtifacts(ctx: BotContext, tools: ToolRegistry, userId: string, steps: Array<{ toolCall: { name: string }; result: { success: boolean; data?: unknown } }>): Promise<void> {
   const zipped = collectArtifactPaths(steps, (name) => name === 'zip_files');
   const singles = collectArtifactPaths(steps, (name) => name !== 'zip_files' && FILE_PRODUCING_TOOLS.has(name));
 
@@ -135,7 +134,10 @@ async function deliverFileArtifacts(ctx: BotContext, tools: ToolRegistry, userId
   }
 }
 
-function collectArtifactPaths(steps: AgentStep[], matches: (toolName: string) => boolean): string[] {
+function collectArtifactPaths(
+  steps: Array<{ toolCall: { name: string }; result: { success: boolean; data?: unknown } }>,
+  matches: (toolName: string) => boolean,
+): string[] {
   const paths: string[] = [];
   for (const step of steps) {
     if (!step.result.success || !matches(step.toolCall.name)) continue;

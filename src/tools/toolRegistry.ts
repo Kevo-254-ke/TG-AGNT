@@ -3,6 +3,8 @@ import { logger } from '../core/logger';
 import type { ToolExecutionResult } from '../core/types';
 import { CodeExecutor, type SupportedLanguage } from './codeExec';
 import { WorkspaceManager } from './workspaceManager';
+import { parseDocument } from './documentParser';
+
 
 const log = logger.child({ module: 'tools:registry' });
 
@@ -88,6 +90,20 @@ export class ToolRegistry {
             .filter(Boolean)
             .join('\n\n');
           return { success: result.exitCode === 0, message: summary, data: result };
+        }
+                case 'read_document': {
+          const { filename } = requireStrings(args, ['filename']);
+          const absolutePath = fileOps.resolveAbsolutePath(filename);
+          const parsed = await parseDocument(absolutePath, filename);
+          if (parsed.error) {
+            return { success: false, message: parsed.error, data: parsed };
+          }
+          const meta = parsed.rows !== undefined ? ` (${parsed.rows} rows)` : parsed.pages !== undefined ? ` (${parsed.pages} pages)` : '';
+          return {
+            success: true,
+            message: `📄 ${parsed.filename}${meta}\n\n${parsed.content}`,
+            data: parsed,
+          };
         }
         default:
           return { success: false, message: `Unknown tool: ${name}` };

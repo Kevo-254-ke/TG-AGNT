@@ -106,3 +106,49 @@ export interface ToolHandler {
   definition: ToolDefinition;
   execute(args: Record<string, unknown>): Promise<ToolExecutionResult>;
 }
+
+// ============================================================
+// Execution Controller Types
+// ============================================================
+
+export type TerminationReason =
+  | 'success'
+  | 'max_iterations'
+  | 'max_tool_calls_per_step'
+  | 'cancelled'
+  | 'unrecoverable_error'
+  | 'provider_failure';
+
+export interface ToolExecutionRecord {
+  toolCall: ToolCall;
+  result: ToolExecutionResult;
+  durationMs: number;
+}
+
+export interface ExecutionMetadata {
+  executionId: string;
+  userId: string;
+  startTime: string;
+  endTime: string;
+  durationMs: number;
+  iterations: number;
+  totalToolCalls: number;
+  successfulToolCalls: number;
+  failedToolCalls: number;
+  providerUsed: string;
+  modelUsed: string;
+  terminationReason: TerminationReason;
+  toolRecords: ToolExecutionRecord[];
+}
+
+export interface ExecutionResult {
+  finalContent: string;
+  steps: AgentStep[];
+  metadata: ExecutionMetadata;
+  terminationReason: TerminationReason;
+}
+
+export interface AgentStep {
+  toolCall: ToolCall;
+  result: ToolExecutionResult;
+}

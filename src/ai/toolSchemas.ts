@@ -123,4 +123,19 @@ export const TOOL_SCHEMAS: ToolDefinition[] = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'read_document',
+      description:
+        'Read and parse a document file (PDF, DOCX, CSV, TXT, JSON, MD) from the sandboxed workspace. Returns the text content in a format suitable for analysis. For CSV, returns a structured preview with row count.',
+      parameters: {
+        type: 'object',
+        properties: {
+          filename: { type: 'string', description: 'Relative filename of the document to read' },
+        },
+        required: ['filename'],
+      },
+    },
+  },
 ];

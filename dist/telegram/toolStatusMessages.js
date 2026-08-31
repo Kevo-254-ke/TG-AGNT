@@ -19,6 +19,8 @@ function describeToolCall(name, args) {
             return `📝 Writing ${filename ?? 'a file'}...`;
         case 'read_file':
             return `📖 Reading ${filename ?? 'the file'}...`;
+        case 'read_document':
+            return `📄 Parsing ${filename ?? 'the document'}...`;
         case 'update_file':
             return `✏️ Updating ${filename ?? 'the file'}...`;
         case 'delete_file':

@@ -5,6 +5,7 @@ const env_1 = require("../config/env");
 const logger_1 = require("../core/logger");
 const codeExec_1 = require("./codeExec");
 const workspaceManager_1 = require("./workspaceManager");
+const documentParser_1 = require("./documentParser");
 const log = logger_1.logger.child({ module: 'tools:registry' });
 /**
  * Maps a tool-call name (as emitted by the AI) to an executor function,
@@ -85,6 +86,20 @@ class ToolRegistry {
                         .filter(Boolean)
                         .join('\n\n');
                     return { success: result.exitCode === 0, message: summary, data: result };
+                }
+                case 'read_document': {
+                    const { filename } = requireStrings(args, ['filename']);
+                    const absolutePath = fileOps.resolveAbsolutePath(filename);
+                    const parsed = await (0, documentParser_1.parseDocument)(absolutePath, filename);
+                    if (parsed.error) {
+                        return { success: false, message: parsed.error, data: parsed };
+                    }
+                    const meta = parsed.rows !== undefined ? ` (${parsed.rows} rows)` : parsed.pages !== undefined ? ` (${parsed.pages} pages)` : '';
+                    return {
+                        success: true,
+                        message: `📄 ${parsed.filename}${meta}\n\n${parsed.content}`,
+                        data: parsed,
+                    };
                 }
                 default:
                     return { success: false, message: `Unknown tool: ${name}` };
